@@ -70,7 +70,8 @@ class AfmEnvironment(gym.Env):
                  num_historic_data: int = 4,
                  height_offset_reward=0.3,
                  num_actions=1,
-                 render_mode: Literal[None, 'human', 'rgb'] = None
+                 render_mode: Literal[None, 'human', 'rgb'] = None,
+                 norm_margin: float = 0.5  # Margin in Angstroms for normalization masking
                  ) -> None:
         """
         Constructor
@@ -140,15 +141,41 @@ class AfmEnvironment(gym.Env):
         self._x_lim = self.afm_images.shape[0]
         self._y_lim = self.afm_images.shape[1]
 
-        # Define observation space
-        x_px_max, y_px_max, _ = self.afm_images.shape
+        # --- NORMALIZATION LOGIC START ---
 
+        # 1. Create a mask for valid simulation space (above the surface)
+        # We assume the agent will terminate if it goes below min_image, so we
+        # only want to normalize based on values it can actually see alive.
+
+        # Broadcasting: (1, 1, Z) vs (X, Y, 1) -> (X, Y, Z) boolean mask
+        z_grid = self.z_height_map[np.newaxis, np.newaxis, :]
+        surface_grid = self.min_image[:, :, np.newaxis]
+
+        # Include a small margin (e.g. 0.5 A) because the agent might step slightly
+        # below the exact minimum before the termination condition triggers.
+        valid_mask = z_grid >= (surface_grid - norm_margin)
+
+        # Extract valid df values to find realistic min/max
+        valid_df_values = self.afm_images[valid_mask]
+
+        self.norm_bounds = {
+            'x': (0.0, float(self._x_lim - 1)),
+            'y': (0.0, float(self._y_lim - 1)),
+            'df': (float(np.min(valid_df_values)), float(np.max(valid_df_values))),
+            # dz is relative to start, max possible deviation is the full Z scan range
+            'dz': (float(-(self.z_max - self.z_min)), float(self.z_max - self.z_min))
+        }
+
+        # --- NORMALIZATION LOGIC END ---
+
+        # Define observation space
+        # Everything is now float32 and normalized to [-1, 1]
         self.observation_space = gym.spaces.Dict(
             {
-                "x": gym.spaces.Box(0, x_px_max - 1, shape=(num_historic_data,), dtype=np.int64),
-                "y": gym.spaces.Box(0, y_px_max - 1, shape=(num_historic_data,), dtype=np.int64),
-                "dz": gym.spaces.Box(-self.z_max, self.z_max, shape=(num_historic_data,), dtype=np.float64),
-                "df": gym.spaces.Box(-np.inf, np.inf, shape=(num_historic_data,), dtype=np.float64),
+                "x": gym.spaces.Box(-1.0, 1.0, shape=(num_historic_data,), dtype=np.float32),
+                "y": gym.spaces.Box(-1.0, 1.0, shape=(num_historic_data,), dtype=np.float32),
+                "dz": gym.spaces.Box(-1.0, 1.0, shape=(num_historic_data,), dtype=np.float32),
+                "df": gym.spaces.Box(-1.0, 1.0, shape=(num_historic_data,), dtype=np.float32),
             }
         )
 
@@ -158,9 +185,32 @@ class AfmEnvironment(gym.Env):
             self.action_space = gym.spaces.Discrete(self.num_actions)
             self._action_map = np.linspace(-1.0, 1.0, self.num_actions)
         else:
-            self.action_space = gym.spaces.Box(-1, 1, shape=(1,), dtype=np.float64)
+            self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float64)
 
         self.reset()
+
+    def _normalize(self, value: np.ndarray | float, key: str) -> np.ndarray | float:
+        """
+        Normalize a physical value to range [-1, 1].
+        Formula: 2 * (x - min) / (max - min) - 1
+        """
+        min_v, max_v = self.norm_bounds[key]
+        return 2.0 * ((value - min_v) / (max_v - min_v)) - 1.0
+
+    def denormalize_observation(self, obs_dict: dict) -> dict:
+        """
+        Convert a normalized observation dictionary back to physical units.
+        Useful for plotting and interpretation.
+        Formula: (x + 1) / 2 * (max - min) + min
+        """
+        physical_obs = {}
+        for key, value in obs_dict.items():
+            if key in self.norm_bounds:
+                min_v, max_v = self.norm_bounds[key]
+                physical_obs[key] = (value + 1.0) / 2.0 * (max_v - min_v) + min_v
+            else:
+                physical_obs[key] = value
+        return physical_obs
 
     def _get_closest_slice_index(self, z: float) -> np.int64:
         """
@@ -213,7 +263,11 @@ class AfmEnvironment(gym.Env):
             The interpolated value at the specified z-coordinate.
         """
         z1, z2 = self._get_two_closest_z_planes(z)
-        k = (self.afm_images[x, y, z2] - self.afm_images[x, y, z1]) / (self.z_height_map[z2] - self.z_height_map[z1])
+        denom = (self.z_height_map[z2] - self.z_height_map[z1])
+        if denom == 0:
+            return self.afm_images[x, y, z1]
+
+        k = (self.afm_images[x, y, z2] - self.afm_images[x, y, z1]) / denom
         return k * (z - self.z_height_map[z1]) + self.afm_images[x, y, z1]
 
     def _get_obs(self):
@@ -226,10 +280,10 @@ class AfmEnvironment(gym.Env):
             Observation dictionary with x and y position, difference to the starting height and change in frequency
         """
         return {
-            "x": self._x,
-            "y": self._y,
-            "dz": self._dz,
-            "df": self._df
+            "x": self._normalize(self._x, 'x').astype(np.float32),
+            "y": self._normalize(self._y, 'y').astype(np.float32),
+            "dz": self._normalize(self._dz, 'dz').astype(np.float32),
+            "df": self._normalize(self._df, 'df').astype(np.float32)
         }
 
     def _get_info(self):
@@ -275,8 +329,8 @@ class AfmEnvironment(gym.Env):
 
         self._x = np.zeros(self.num_historic_data, dtype=np.int64)
         self._y = np.zeros(self.num_historic_data, dtype=np.int64)
-        self._dz = np.zeros(self.num_historic_data)
-        self._df = self.afm_images[0, 0, self.z_start_index] * np.ones(self.num_historic_data)
+        self._dz = np.zeros(self.num_historic_data, dtype=np.float64)
+        self._df = self.afm_images[0, 0, self.z_start_index] * np.ones(self.num_historic_data, dtype=np.float64)
 
         self.generated_image = np.empty(self.afm_images.shape[:2])
         self.generated_image[:] = np.nan
@@ -314,12 +368,12 @@ class AfmEnvironment(gym.Env):
             tuple: (observation, reward, terminated, truncated, info)
         """
         if self.terminated:
-            return self._get_obs(), 0, True, False, self._get_info()
+            return self._get_obs(), 0.0, True, False, self._get_info()
 
         x_lim = self._x_lim
         y_lim = self._y_lim
 
-        # We shift all history arrays now (x, y, dz, df)
+        # Shift history arrays
         self._x[1:] = self._x[:-1]
         self._y[1:] = self._y[:-1]
         self._dz[1:] = self._dz[:-1]
@@ -390,10 +444,11 @@ class AfmEnvironment(gym.Env):
         # Check for crashes
         # TODO: Add tolerance?
         if z_new < self.min_image[x_new, y_new]:
-            return self._get_obs(), -100, True, False, self._get_info()
+            # Terminate, but return the normalized observation (which might be < -1.0)
+            return self._get_obs(), -100.0, True, False, self._get_info()
 
         # TODO: Base reward should be set by variable
-        reward = 10 - (z_new - self.optimal_height[x_new, y_new])
+        reward = 10.0 - (z_new - self.optimal_height[x_new, y_new])
 
         # Termination check
         if y_new == y_lim - 1:  # Check last row
