@@ -75,26 +75,29 @@ class AfmEnvironment(gym.Env):
 
     def save_to_file(self, path: str):
         """
-        Saves the necessary environment variables to a .npz file.
+        Saves all views to a folder, one .npz file per view.
 
         Parameters
         ----------
-        Path
-            Directory where to save the environment to
+        path : str
+            Directory where to save the environment views to.
+            Each view is saved as view_000.npz, view_001.npz, etc.
         """
-        np.savez(
-            path,
-            afm_images=self.afm_images,
-            z_height_map=self.z_height_map,
-            min_image=self.min_image,
-            z_bounds=np.array([self.z_min, self.z_max])
-        )
+        os.makedirs(path, exist_ok=True)
+        for i, view in enumerate(self.views):
+            np.savez(
+                os.path.join(path, f"view_{i:03d}.npz"),
+                afm_images=view['afm_images'],
+                z_height_map=view['z_height_map'],
+                min_image=view['min_image'],
+                z_bounds=np.array([view['z_min'], view['z_max']])
+            )
 
     # TODO: Implement render mode
-    # TODO: Figure out how to handle multiple surfaces at once
     def __init__(self,
                  surface_path: str = None,
                  params_path: str = None,
+                 data_dir_path: str = None,
                  data_file_path: str = None,
                  i_platform: int = 0,
                  sigma: int = 4,
@@ -103,9 +106,7 @@ class AfmEnvironment(gym.Env):
                  num_actions=1,
                  render_mode: Literal[None, 'human', 'rgb'] = None,
                  norm_margin: float = 0.5,  # Margin in Angstroms for normalization masking
-                 angle_deg: float = 0.0,
-                 tx: float = 0.0,
-                 ty: float = 0.0
+                 scan_params: list[dict] | None = None,
                  ) -> None:
         """
         Constructor
@@ -116,91 +117,115 @@ class AfmEnvironment(gym.Env):
             Path to a .xyz file containing the surface
         params_path : str
             Path to a .ini file containing the parameters for the simulation
+        data_dir_path : str
+            Path to a directory containing pre-computed view .npz files.
+            Each file should be named view_000.npz, view_001.npz, etc.
+        data_file_path : str
+            Path to a single .npz file (legacy, loaded as a single view).
         i_platform : int
             Index of OpenCL device
         render_mode : Literal[None, 'human', 'rgb']
             Render mode to use
+        scan_params : list[dict] | None
+            List of scan parameter dicts, each with keys 'angle_deg', 'tx', 'ty'.
+            Each entry defines a different view of the surface.
+            If None, defaults to a single view with no rotation/translation.
+            Example: [{'angle_deg': 0, 'tx': 0, 'ty': 0}, {'angle_deg': 15, 'tx': 1.0, 'ty': 0}]
         """
         super().__init__()
 
         self.num_historic_data = num_historic_data
         self.height_offset_reward = height_offset_reward
         self.num_actions = num_actions
+        self.sigma = sigma
 
-        if data_file_path and os.path.exists(data_file_path):
+        # --- Load or compute all views ---
+        self.views = []
+
+        if data_dir_path and os.path.isdir(data_dir_path):
+            # Load all view files from directory
+            view_files = sorted([
+                f for f in os.listdir(data_dir_path)
+                if f.startswith("view_") and f.endswith(".npz")
+            ])
+            if not view_files:
+                raise ValueError(f"No view_*.npz files found in {data_dir_path}")
+            for vf in view_files:
+                data = np.load(os.path.join(data_dir_path, vf))
+                self.views.append(self._build_view_from_data(data, sigma))
+
+        elif data_file_path and os.path.exists(data_file_path):
+            # Legacy: single .npz file loaded as one view
             data = np.load(data_file_path)
-            self.afm_images = data['afm_images']
-            self.z_height_map = data['z_height_map']
-            self.min_image = data['min_image']
-            self.z_min, self.z_max = data['z_bounds']
+            self.views.append(self._build_view_from_data(data, sigma))
+
         else:
             if not surface_path or not params_path:
-                raise ValueError("Must provide surface_path and params_path if data_file_path is missing.")
+                raise ValueError(
+                    "Must provide surface_path and params_path if data_dir_path/data_file_path is missing."
+                )
 
-            # Generate images
-            afmulator, self.afm_images = self._compute_imgs(surface_path, params_path, i_platform, angle_deg, tx, ty)
+            if scan_params is None:
+                scan_params = [{'angle_deg': 0.0, 'tx': 0.0, 'ty': 0.0}]
 
-            # Calculate heights for each slice
-            self.z_height_map = np.linspace(
-                afmulator.scan_window[0][2],
-                afmulator.scan_window[1][2] - afmulator.df_steps * afmulator.dz,
-                afmulator.scan_dim[2] - afmulator.df_steps + 1,
-            )
-
-            # Get all minima in the z direction and only keep the highest one
-            minima = np.array(argrelextrema(self.afm_images, np.less_equal, axis=2)).T
-            minima_dict = defaultdict(list)
-            for xx, yy, zz in minima:
-                minima_dict[xx, yy].append(zz)
-                minima_dict[xx, yy] = [max(minima_dict[xx, yy])]
-
-            argmin_image = np.zeros(self.afm_images.shape[0:-1], dtype=int)
-            for pixel, val in minima_dict.items():
-                argmin_image[pixel] = int(val[0])
-
-            # Convert index to actual height and smooth optimal surface
-            self.min_image = self.z_height_map[argmin_image]
-
-            self.z_min = afmulator.scan_window[0][2]
-            self.z_max = afmulator.scan_window[1][2] - afmulator.df_steps * afmulator.dz
-
-            del afmulator
-
-        # TODO: Shift optimal height upwards?
-        self.optimal_height = gaussian_filter(self.min_image, sigma=sigma) + self.height_offset_reward
-
-        self._z_map_start = self.z_height_map[0]
-        self._z_map_step = self.z_height_map[1] - self.z_height_map[0]
-        self._z_map_len_minus_1 = len(self.z_height_map) - 1
-        self._x_lim = self.afm_images.shape[0]
-        self._y_lim = self.afm_images.shape[1]
+            for sp in scan_params:
+                view = self._compute_view(
+                    surface_path, params_path, i_platform, sigma,
+                    angle_deg=sp.get('angle_deg', 0.0),
+                    tx=sp.get('tx', 0.0),
+                    ty=sp.get('ty', 0.0),
+                )
+                self.views.append(view)
 
         # --- NORMALIZATION LOGIC START ---
+        # Compute global normalization bounds across all views.
+        # All views must have the same spatial dimensions for a consistent observation space.
+        ref = self.views[0]
+        x_lim = ref['afm_images'].shape[0]
+        y_lim = ref['afm_images'].shape[1]
 
-        # 1. Create a mask for valid simulation space (above the surface)
-        # We assume the agent will terminate if it goes below min_image, so we
-        # only want to normalize based on values it can actually see alive.
+        global_df_min = np.inf
+        global_df_max = -np.inf
+        global_dz_range = 0.0
 
-        # Broadcasting: (1, 1, Z) vs (X, Y, 1) -> (X, Y, Z) boolean mask
-        z_grid = self.z_height_map[np.newaxis, np.newaxis, :]
-        surface_grid = self.min_image[:, :, np.newaxis]
+        for view in self.views:
+            assert view['afm_images'].shape[0] == x_lim and view['afm_images'].shape[1] == y_lim, \
+                "All views must have the same spatial (X, Y) dimensions."
 
-        # Include a small margin (e.g. 0.5 A) because the agent might step slightly
-        # below the exact minimum before the termination condition triggers.
-        valid_mask = z_grid >= (surface_grid - norm_margin)
+            # 1. Create a mask for valid simulation space (above the surface)
+            # We assume the agent will terminate if it goes below min_image, so we
+            # only want to normalize based on values it can actually see alive.
 
-        # Extract valid df values to find realistic min/max
-        valid_df_values = self.afm_images[valid_mask]
+            # Broadcasting: (1, 1, Z) vs (X, Y, 1) -> (X, Y, Z) boolean mask
+            z_grid = view['z_height_map'][np.newaxis, np.newaxis, :]
+            surface_grid = view['min_image'][:, :, np.newaxis]
+
+            # Include a small margin (e.g. 0.5 A) because the agent might step slightly
+            # below the exact minimum before the termination condition triggers.
+            valid_mask = z_grid >= (surface_grid - norm_margin)
+
+            # Extract valid df values to find realistic min/max
+            valid_df_values = view['afm_images'][valid_mask]
+
+            global_df_min = min(global_df_min, float(np.min(valid_df_values)))
+            global_df_max = max(global_df_max, float(np.max(valid_df_values)))
+
+            # dz is relative to start, max possible deviation is the full Z scan range
+            z_range = view['z_max'] - view['z_min']
+            global_dz_range = max(global_dz_range, z_range)
 
         self.norm_bounds = {
-            'x': (0.0, float(self._x_lim - 1)),
-            'y': (0.0, float(self._y_lim - 1)),
-            'df': (float(np.min(valid_df_values)), float(np.max(valid_df_values))),
-            # dz is relative to start, max possible deviation is the full Z scan range
-            'dz': (float(-(self.z_max - self.z_min)), float(self.z_max - self.z_min))
+            'x': (0.0, float(x_lim - 1)),
+            'y': (0.0, float(y_lim - 1)),
+            'df': (global_df_min, global_df_max),
+            'dz': (float(-global_dz_range), float(global_dz_range))
         }
 
         # --- NORMALIZATION LOGIC END ---
+
+        # Store spatial limits (same for all views)
+        self._x_lim = x_lim
+        self._y_lim = y_lim
 
         # Define observation space
         # Everything is now float32 and normalized to [-1, 1]
@@ -222,6 +247,79 @@ class AfmEnvironment(gym.Env):
             self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float64)
 
         self.reset()
+
+    def _build_view_from_data(self, data: np.lib.npyio.NpzFile, sigma: int) -> dict:
+        """
+        Build a view dict from a loaded .npz data file.
+        """
+        afm_images = data['afm_images']
+        z_height_map = data['z_height_map']
+        min_image = data['min_image']
+        z_min, z_max = data['z_bounds']
+
+        # TODO: Shift optimal height upwards?
+        optimal_height = gaussian_filter(min_image, sigma=sigma) + self.height_offset_reward
+
+        return {
+            'afm_images': afm_images,
+            'z_height_map': z_height_map,
+            'min_image': min_image,
+            'z_min': float(z_min),
+            'z_max': float(z_max),
+            'optimal_height': optimal_height,
+            '_z_map_start': z_height_map[0],
+            '_z_map_step': z_height_map[1] - z_height_map[0],
+            '_z_map_len_minus_1': len(z_height_map) - 1,
+        }
+
+    def _compute_view(self, surface_path: str, params_path: str, i_platform: int,
+                      sigma: int, angle_deg: float, tx: float, ty: float) -> dict:
+        """
+        Compute a single view from scratch and return a view dict.
+        """
+        afmulator, afm_images = self._compute_imgs(
+            surface_path, params_path, i_platform, angle_deg, tx, ty
+        )
+
+        z_height_map = np.linspace(
+            afmulator.scan_window[0][2],
+            afmulator.scan_window[1][2] - afmulator.df_steps * afmulator.dz,
+            afmulator.scan_dim[2] - afmulator.df_steps + 1,
+        )
+
+        # Get all minima in the z direction and only keep the highest one
+        minima = np.array(argrelextrema(afm_images, np.less_equal, axis=2)).T
+        minima_dict = defaultdict(list)
+        for xx, yy, zz in minima:
+            minima_dict[xx, yy].append(zz)
+            minima_dict[xx, yy] = [max(minima_dict[xx, yy])]
+
+        argmin_image = np.zeros(afm_images.shape[0:-1], dtype=int)
+        for pixel, val in minima_dict.items():
+            argmin_image[pixel] = int(val[0])
+
+        # Convert index to actual height and smooth optimal surface
+        min_image = z_height_map[argmin_image]
+
+        z_min = afmulator.scan_window[0][2]
+        z_max = afmulator.scan_window[1][2] - afmulator.df_steps * afmulator.dz
+
+        # TODO: Shift optimal height upwards?
+        optimal_height = gaussian_filter(min_image, sigma=sigma) + self.height_offset_reward
+
+        del afmulator
+
+        return {
+            'afm_images': afm_images,
+            'z_height_map': z_height_map,
+            'min_image': min_image,
+            'z_min': float(z_min),
+            'z_max': float(z_max),
+            'optimal_height': optimal_height,
+            '_z_map_start': z_height_map[0],
+            '_z_map_step': z_height_map[1] - z_height_map[0],
+            '_z_map_len_minus_1': len(z_height_map) - 1,
+        }
 
     def _normalize(self, value: np.ndarray | float, key: str) -> np.ndarray | float:
         """
@@ -337,7 +435,8 @@ class AfmEnvironment(gym.Env):
     # TODO: Randomize start position and rotation. Maybe also switch between different surfaces?
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None) -> tuple[ObsType, dict[str, Any]]:
         """
-        Resets the environment
+        Resets the environment. Randomly selects a view from the available views
+        and initializes the agent state.
 
         Parameters
         ----------
@@ -356,6 +455,22 @@ class AfmEnvironment(gym.Env):
             np.random.seed(seed)
 
         self.terminated = False
+
+        # Randomly sample a view for this episode
+        view_idx = np.random.randint(len(self.views))
+        view = self.views[view_idx]
+        self.active_view_idx = view_idx
+
+        # Set active view data as instance attributes for use in step/obs
+        self.afm_images = view['afm_images']
+        self.z_height_map = view['z_height_map']
+        self.min_image = view['min_image']
+        self.z_min = view['z_min']
+        self.z_max = view['z_max']
+        self.optimal_height = view['optimal_height']
+        self._z_map_start = view['_z_map_start']
+        self._z_map_step = view['_z_map_step']
+        self._z_map_len_minus_1 = view['_z_map_len_minus_1']
 
         z = self.z_max - np.random.rand()
         self.z_start_index = self._get_closest_slice_index(z)
