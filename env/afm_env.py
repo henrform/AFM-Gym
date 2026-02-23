@@ -75,19 +75,29 @@ class AfmEnvironment(gym.Env):
 
     def save_to_file(self, path: str):
         """
-        Saves all views to a folder, one .npz file per view.
+        Saves all views to a folder, one subdirectory per view.
+
+        Each view is saved as view_00000/afm_images.npy (uncompressed, float16)
+        and view_00000/meta.npz (small metadata arrays). The uncompressed .npy
+        format enables true memory-mapping via np.load(..., mmap_mode='r').
 
         Parameters
         ----------
         path : str
             Directory where to save the environment views to.
-            Each view is saved as view_000.npz, view_001.npz, etc.
         """
         os.makedirs(path, exist_ok=True)
         for i, view in enumerate(self.views):
+            view_dir = os.path.join(path, f"view_{i:05d}")
+            os.makedirs(view_dir, exist_ok=True)
+            # Uncompressed .npy so np.load can truly memory-map it
+            np.save(
+                os.path.join(view_dir, "afm_images.npy"),
+                view['afm_images'].astype(np.float16)
+            )
+            # Small metadata arrays; compression is fine here
             np.savez(
-                os.path.join(path, f"view_{i:05d}.npz"),
-                afm_images=view['afm_images'].astype(np.float32),
+                os.path.join(view_dir, "meta.npz"),
                 z_height_map=view['z_height_map'],
                 min_image=view['min_image'],
                 z_bounds=np.array([view['z_min'], view['z_max']])
@@ -147,20 +157,41 @@ class AfmEnvironment(gym.Env):
         self.views = []
 
         if data_dir_path and os.path.isdir(data_dir_path):
-            # Load all view files from directory
-            view_files = sorted([
-                f for f in os.listdir(data_dir_path)
-                if f.startswith("view_") and f.endswith(".npz")
+            # New format: view_*/ subdirectories, each with afm_images.npy + meta.npz
+            view_dirs = sorted([
+                d for d in os.listdir(data_dir_path)
+                if d.startswith("view_") and os.path.isdir(os.path.join(data_dir_path, d))
             ])
-            if not view_files:
-                raise ValueError(f"No view_*.npz files found in {data_dir_path}")
-            for vf in view_files:
-                data = np.load(os.path.join(data_dir_path, vf), mmap_mode='r')
-                self.views.append(self._build_view_from_data(data, sigma))
+            if view_dirs:
+                for vd in view_dirs:
+                    vpath = os.path.join(data_dir_path, vd)
+                    # True memory-map: OS pages in only the slices that are accessed
+                    afm_images = np.load(os.path.join(vpath, "afm_images.npy"), mmap_mode='r')
+                    meta = np.load(os.path.join(vpath, "meta.npz"))
+                    data = {
+                        'afm_images': afm_images,
+                        'z_height_map': meta['z_height_map'],
+                        'min_image': meta['min_image'],
+                        'z_bounds': meta['z_bounds'],
+                    }
+                    self.views.append(self._build_view_from_data(data, sigma))
+            else:
+                # Legacy format: flat view_*.npz files (no true memmap)
+                view_files = sorted([
+                    f for f in os.listdir(data_dir_path)
+                    if f.startswith("view_") and f.endswith(".npz")
+                ])
+                if not view_files:
+                    raise ValueError(
+                        f"No view_*/ directories or view_*.npz files found in {data_dir_path}"
+                    )
+                for vf in view_files:
+                    data = np.load(os.path.join(data_dir_path, vf))
+                    self.views.append(self._build_view_from_data(data, sigma))
 
         elif data_file_path and os.path.exists(data_file_path):
-            # Legacy: single .npz file loaded as one view
-            data = np.load(data_file_path, mmap_mode='r')
+            # Legacy: single .npz file loaded as one view (no true memmap)
+            data = np.load(data_file_path)
             self.views.append(self._build_view_from_data(data, sigma))
 
         else:
@@ -252,11 +283,13 @@ class AfmEnvironment(gym.Env):
 
         self.reset()
 
-    def _build_view_from_data(self, data: np.lib.npyio.NpzFile, sigma: int) -> dict:
+    def _build_view_from_data(self, data: np.lib.npyio.NpzFile | dict, sigma: int) -> dict:
         """
-        Build a view dict from a loaded .npz data file.
+        Build a view dict from loaded data (NpzFile or plain dict).
+        When afm_images is already float16 (e.g. from a memory-mapped .npy),
+        copy=False avoids an unnecessary allocation.
         """
-        afm_images = data['afm_images'].astype(np.float16)
+        afm_images = data['afm_images'].astype(np.float16, copy=False)
         z_height_map = data['z_height_map']
         min_image = data['min_image']
         z_min, z_max = data['z_bounds']
