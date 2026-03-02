@@ -119,6 +119,9 @@ class AfmEnvironment(gym.Env):
                  df_scale: float = 10.0,  # Divisor for df observations (physical units)
                  dz_scale: float = 10.0,  # Divisor for dz observations (physical units)
                  scan_params: list[dict] | None = None,
+                 base_reward: float = 0.1,
+                 crash_reward: float = -1.0,
+                 termination_reward: float = 100.0,
                  ) -> None:
         """
         Constructor
@@ -143,6 +146,12 @@ class AfmEnvironment(gym.Env):
             Each entry defines a different view of the surface.
             If None, defaults to a single view with no rotation/translation.
             Example: [{'angle_deg': 0, 'tx': 0, 'ty': 0}, {'angle_deg': 15, 'tx': 1.0, 'ty': 0}]
+        base_reward : float
+            Reward given when the tip is at or above the optimal height.
+        crash_reward : float
+            Penalty applied in the danger zone (scaled) and on a crash (full).
+        termination_reward : float
+            Bonus reward added on successful scan completion.
         """
         super().__init__()
 
@@ -152,6 +161,9 @@ class AfmEnvironment(gym.Env):
         self.sigma = sigma
         self.df_scale = df_scale
         self.dz_scale = dz_scale
+        self.base_reward = base_reward
+        self.crash_reward = crash_reward
+        self.termination_reward = termination_reward
 
         # --- Load or compute all views ---
         self.views = []
@@ -628,42 +640,35 @@ class AfmEnvironment(gym.Env):
         self._df[0] = df_new
         self.generated_image[x_new, y_new] = df_new
 
-        # Check for crashes
+        # Check for crashes and calculate reward
         # TODO: Add tolerance?
 
         z_opt = self.optimal_height[x_new, y_new]
         z_min = self.min_image[x_new, y_new]
 
-        # 1. Above or exactly at optimal height (Safe Zone)
         if z_new >= z_opt:
-            reward = 10.0 - (z_new - z_opt)
+            reward = self.base_reward - (z_new - z_opt)
             
-        # 2. Below optimal height but above crash boundary (Danger Zone)
         elif z_new > z_min:
-            # Calculate how far we are between min_image (0.0) and optimal_height (1.0)
-            # Since optimal_height = min_image + height_offset_reward, the denominator is just height_offset_reward
-            fraction = (z_new - z_min) / self.height_offset_reward
-            
-            # Drops immediately near 0 just below z_opt, scales linearly down to -100 near z_min
-            reward = -100.0 * (1.0 - fraction)
+            danger_zone_range = z_opt - z_min
+            danger_zone_range = max(danger_zone_range, 1e-6)
+
+            fraction = (z_new - z_min) / danger_zone_range
+            fraction = min(fraction, 1.0)
+
+            reward = self.crash_reward * (1.0 - fraction)
             
         # 3. At or below min_image (Crash Zone)
         else:
-            return self._get_obs(), -100.0, True, False, self._get_info()
-
-
-        # if z_new < self.min_image[x_new, y_new]:
-        #     # Terminate, but return the normalized observation (which might be < -1.0)
-        #     return self._get_obs(), -100.0, True, False, self._get_info()
-
-        # # TODO: Base reward should be set by variable
-        # reward = 10.0 - (z_new - self.optimal_height[x_new, y_new])
+            return self._get_obs(), self.crash_reward, True, False, self._get_info()
 
         # Termination check
         if y_new == y_lim - 1:  # Check last row
             if y_new % 2 == 0 and x_new == x_lim - 1:
                 self.terminated = True
+                reward += self.termination_reward
             elif y_new % 2 == 1 and x_new == 0:
                 self.terminated = True
+                reward += self.termination_reward
 
         return self._get_obs(), reward, self.terminated, False, self._get_info()
