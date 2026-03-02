@@ -13,6 +13,33 @@ import gymnasium as gym
 import os
 
 
+def jitter_penalty_difference(dz_window: np.ndarray, scale: float = 1.0) -> float:
+    """
+    Jitter penalty based on total variation of dz over the window.
+    Sums the absolute differences between consecutive dz values, scaled by `scale`.
+
+    Usage
+    -----
+    env = AfmEnvironment(
+        ...,
+        jitter_penalty_fn=jitter_penalty_difference,
+        jitter_penalty_kwargs={'scale': 0.5},
+    )
+
+    Parameters
+    ----------
+    dz_window : np.ndarray
+        Array of recent dz values.
+    scale : float
+        Multiplicative scale factor applied to the total variation.
+
+    Returns
+    -------
+    float
+    """
+    return scale * float(np.sum(np.abs(np.diff(dz_window))))
+
+
 class AfmEnvironment(gym.Env):
     metadata = {'render.modes': ['human', 'rgb_array']}
 
@@ -122,6 +149,9 @@ class AfmEnvironment(gym.Env):
                  base_reward: float = 0.1,
                  crash_reward: float = -1.0,
                  termination_reward: float = 100.0,
+                 jitter_penalty_fn=None,
+                 jitter_penalty_kwargs: dict | None = None,
+                 jitter_window: int | None = None,
                  ) -> None:
         """
         Constructor
@@ -152,6 +182,17 @@ class AfmEnvironment(gym.Env):
             Penalty applied in the danger zone (scaled) and on a crash (full).
         termination_reward : float
             Bonus reward added on successful scan completion.
+        jitter_penalty_fn : callable | None
+            Function with signature ``fn(dz_window, **jitter_penalty_kwargs) -> float``
+            called each non-crash step. The returned value is subtracted from the reward.
+            None (default) disables jitter penalization entirely.
+            Use ``global_jitter_penalty`` for the built-in total-variation penalty.
+        jitter_penalty_kwargs : dict | None
+            Keyword arguments forwarded to jitter_penalty_fn on every call.
+            Defaults to an empty dict.
+        jitter_window : int | None
+            Number of most-recent timesteps passed to jitter_penalty_fn.
+            None defaults to num_historic_data.
         """
         super().__init__()
 
@@ -164,6 +205,9 @@ class AfmEnvironment(gym.Env):
         self.base_reward = base_reward
         self.crash_reward = crash_reward
         self.termination_reward = termination_reward
+        self.jitter_penalty_fn = jitter_penalty_fn
+        self.jitter_penalty_kwargs = jitter_penalty_kwargs if jitter_penalty_kwargs is not None else {}
+        self.jitter_window = jitter_window if jitter_window is not None else num_historic_data
 
         # --- Load or compute all views ---
         self.views = []
@@ -648,7 +692,7 @@ class AfmEnvironment(gym.Env):
 
         if z_new >= z_opt:
             reward = self.base_reward - (z_new - z_opt)
-            
+
         elif z_new > z_min:
             danger_zone_range = z_opt - z_min
             danger_zone_range = max(danger_zone_range, 1e-6)
@@ -657,10 +701,14 @@ class AfmEnvironment(gym.Env):
             fraction = min(fraction, 1.0)
 
             reward = self.crash_reward * (1.0 - fraction)
-            
+
         # 3. At or below min_image (Crash Zone)
         else:
             return self._get_obs(), self.crash_reward, True, False, self._get_info()
+
+        # Apply jitter penalty
+        if self.jitter_penalty_fn is not None:
+            reward -= self.jitter_penalty_fn(self._dz[:self.jitter_window], **self.jitter_penalty_kwargs)
 
         # Termination check
         if y_new == y_lim - 1:  # Check last row
