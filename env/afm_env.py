@@ -11,6 +11,7 @@ import numpy as np
 from collections import defaultdict
 import gymnasium as gym
 import os
+import tempfile
 
 
 def jitter_penalty_difference(dz_window: np.ndarray, scale: float = 1.0) -> float:
@@ -93,16 +94,24 @@ class AfmEnvironment(gym.Env):
 
         new_params_path = params_path.replace(".ini", "_displaced.toml")
 
-        parameters.to_file(new_params_path)
+        with tempfile.NamedTemporaryFile(
+            suffix=".toml", prefix="ppafm_params_", delete=False
+        ) as tmp:
+            new_params_path = tmp.name
 
-        afmulator = AFMulator.from_params(new_params_path)
+        try:
+            parameters.to_file(new_params_path)
+            afmulator = AFMulator.from_params(new_params_path)
+        finally:
+            os.unlink(new_params_path)
+
         afm_images = afmulator(xyzs, Zs, qs)
 
         return afmulator, afm_images[:, ::-1, ::-1].astype(np.float16)
 
-    def save_to_file(self, path: str):
+    def save_to_file(self, path: str, surface_idx: int | None = None):
         """
-        Saves all views to a folder, one subdirectory per view.
+        Saves views to a folder, one subdirectory per view.
 
         Each view is saved as view_00000/afm_images.npy (uncompressed, float16)
         and view_00000/meta.npz (small metadata arrays). The uncompressed .npy
@@ -112,10 +121,27 @@ class AfmEnvironment(gym.Env):
         ----------
         path : str
             Directory where to save the environment views to.
+        surface_idx : int | None
+            If given, only save views belonging to this surface config index.
+            If None, save all views.
         """
+        if surface_idx is not None:
+            start, end = self.surface_view_ranges[surface_idx]
+            views_to_save = self.views[start:end]
+        else:
+            views_to_save = self.views
+
         os.makedirs(path, exist_ok=True)
-        for i, view in enumerate(self.views):
-            view_dir = os.path.join(path, f"view_{i:05d}")
+        for i, view in enumerate(views_to_save):
+            sp = view.get('scan_params')
+            if sp is not None:
+                ang = sp.get('angle_deg', 0.0)
+                tx  = sp.get('tx', 0.0)
+                ty  = sp.get('ty', 0.0)
+                folder_name = f"view_ang{ang:g}_tx{tx:g}_ty{ty:g}"
+            else:
+                folder_name = f"view_{i:05d}"
+            view_dir = os.path.join(path, folder_name)
             os.makedirs(view_dir, exist_ok=True)
             # Uncompressed .npy so np.load can truly memory-map it
             np.save(
@@ -132,20 +158,15 @@ class AfmEnvironment(gym.Env):
 
     # TODO: Implement render mode
     def __init__(self,
-                 surface_path: str = None,
-                 params_path: str = None,
-                 data_dir_path: str = None,
-                 data_file_path: str = None,
+                 surface_configs: list[dict],
                  i_platform: int = 0,
                  sigma: int = 4,
                  num_historic_data: int = 4,
-                 height_offset_reward=0.3,
-                 num_actions=1,
+                 height_offset_reward: float = 0.3,
+                 num_actions: int = 1,
                  render_mode: Literal[None, 'human', 'rgb'] = None,
-                 norm_margin: float = 0.5,  # Margin in Angstroms for normalization masking
-                 df_scale: float = 10.0,  # Divisor for df observations (physical units)
-                 dz_scale: float = 10.0,  # Divisor for dz observations (physical units)
-                 scan_params: list[dict] | None = None,
+                 df_scale: float = 10.0,
+                 dz_scale: float = 10.0,
                  base_reward: float = 0.1,
                  crash_reward: float = -1.0,
                  termination_reward: float = 100.0,
@@ -154,28 +175,56 @@ class AfmEnvironment(gym.Env):
                  jitter_window: int | None = None,
                  ) -> None:
         """
-        Constructor
+        Constructor.
 
         Parameters
         ----------
-        surface_path : str
-            Path to a .xyz file containing the surface
-        params_path : str
-            Path to a .ini file containing the parameters for the simulation
-        data_dir_path : str
-            Path to a directory containing pre-computed view .npz files.
-            Each file should be named view_000.npz, view_001.npz, etc.
-        data_file_path : str
-            Path to a single .npz file (legacy, loaded as a single view).
+        surface_configs : list[dict]
+            List of surface configuration dicts. Each dict specifies one
+            surface and must contain one of the following source options:
+
+            - ``surface_path`` (str) + ``params_path`` (str): compute views
+              from scratch using ppafm.  Optionally include ``scan_params``
+              (list[dict]) with keys ``angle_deg``, ``tx``, ``ty`` for
+              multiple rotated / translated views of the same surface.
+            - ``data_dir_path`` (str): load pre-computed views from a
+              directory containing ``view_*/`` subdirectories (or legacy
+              ``view_*.npz`` files).
+            - ``data_file_path`` (str): load a single legacy ``.npz`` file
+              as one view.
+
+            Example::
+
+                surface_configs = [
+                    {
+                        'surface_path': 'materials/pt_111_small.xyz',
+                        'params_path': 'materials/params.ini',
+                        'scan_params': [
+                            {'angle_deg': 0, 'tx': 0, 'ty': 0},
+                            {'angle_deg': 30, 'tx': 5, 'ty': 0},
+                        ],
+                    },
+                    {
+                        'data_dir_path': 'environments/pt_111_small_rows_missing',
+                    },
+                ]
+
         i_platform : int
-            Index of OpenCL device
+            Index of OpenCL device.
+        sigma : int
+            Standard deviation for Gaussian smoothing of the optimal height.
+        num_historic_data : int
+            Number of historic time-steps in the observation.
+        height_offset_reward : float
+            Offset above the smoothed min-image defining the optimal height.
+        num_actions : int
+            Number of discrete actions.  Use 1 for a continuous action space.
         render_mode : Literal[None, 'human', 'rgb']
-            Render mode to use
-        scan_params : list[dict] | None
-            List of scan parameter dicts, each with keys 'angle_deg', 'tx', 'ty'.
-            Each entry defines a different view of the surface.
-            If None, defaults to a single view with no rotation/translation.
-            Example: [{'angle_deg': 0, 'tx': 0, 'ty': 0}, {'angle_deg': 15, 'tx': 1.0, 'ty': 0}]
+            Render mode to use.
+        df_scale : float
+            Divisor applied to df observations (physical units).
+        dz_scale : float
+            Divisor applied to dz observations (physical units).
         base_reward : float
             Reward given when the tip is at or above the optimal height.
         crash_reward : float
@@ -183,16 +232,15 @@ class AfmEnvironment(gym.Env):
         termination_reward : float
             Bonus reward added on successful scan completion.
         jitter_penalty_fn : callable | None
-            Function with signature ``fn(dz_window, **jitter_penalty_kwargs) -> float``
-            called each non-crash step. The returned value is subtracted from the reward.
-            None (default) disables jitter penalization entirely.
-            Use ``global_jitter_penalty`` for the built-in total-variation penalty.
+            ``fn(dz_window, **kwargs) -> float`` called each non-crash step.
+            The returned value is subtracted from the reward.
+            ``None`` (default) disables jitter penalization entirely.
         jitter_penalty_kwargs : dict | None
-            Keyword arguments forwarded to jitter_penalty_fn on every call.
+            Keyword arguments forwarded to *jitter_penalty_fn*.
             Defaults to an empty dict.
         jitter_window : int | None
-            Number of most-recent timesteps passed to jitter_penalty_fn.
-            None defaults to num_historic_data.
+            Number of most-recent timesteps passed to *jitter_penalty_fn*.
+            ``None`` defaults to *num_historic_data*.
         """
         super().__init__()
 
@@ -209,117 +257,95 @@ class AfmEnvironment(gym.Env):
         self.jitter_penalty_kwargs = jitter_penalty_kwargs if jitter_penalty_kwargs is not None else {}
         self.jitter_window = jitter_window if jitter_window is not None else num_historic_data
 
-        # --- Load or compute all views ---
+        # --- Load or compute views from all surface configs ---
         self.views = []
+        self.surface_view_ranges = []  # (start_idx, end_idx) per surface config
 
-        if data_dir_path and os.path.isdir(data_dir_path):
-            # New format: view_*/ subdirectories, each with afm_images.npy + meta.npz
-            view_dirs = sorted([
-                d for d in os.listdir(data_dir_path)
-                if d.startswith("view_") and os.path.isdir(os.path.join(data_dir_path, d))
-            ])
-            if view_dirs:
-                for vd in view_dirs:
-                    vpath = os.path.join(data_dir_path, vd)
-                    # True memory-map: OS pages in only the slices that are accessed
-                    afm_images = np.load(os.path.join(vpath, "afm_images.npy"), mmap_mode='r')
-                    meta = np.load(os.path.join(vpath, "meta.npz"))
-                    data = {
-                        'afm_images': afm_images,
-                        'z_height_map': meta['z_height_map'],
-                        'min_image': meta['min_image'],
-                        'z_bounds': meta['z_bounds'],
-                    }
-                    self.views.append(self._build_view_from_data(data, sigma))
-            else:
-                # Legacy format: flat view_*.npz files (no true memmap)
-                view_files = sorted([
-                    f for f in os.listdir(data_dir_path)
-                    if f.startswith("view_") and f.endswith(".npz")
+        for config in surface_configs:
+            start_idx = len(self.views)
+
+            data_dir = config.get('data_dir_path')
+            data_file = config.get('data_file_path')
+            surface = config.get('surface_path')
+            params = config.get('params_path')
+
+            if data_dir and os.path.isdir(data_dir):
+                # New format: view_*/ subdirectories, each with afm_images.npy + meta.npz
+                view_dirs = sorted([
+                    d for d in os.listdir(data_dir)
+                    if d.startswith("view_") and os.path.isdir(os.path.join(data_dir, d))
                 ])
-                if not view_files:
+                if view_dirs:
+                    for vd in view_dirs:
+                        vpath = os.path.join(data_dir, vd)
+                        # True memory-map: OS pages in only the slices that are accessed
+                        afm_images = np.load(os.path.join(vpath, "afm_images.npy"), mmap_mode='r')
+                        meta = np.load(os.path.join(vpath, "meta.npz"))
+                        data = {
+                            'afm_images': afm_images,
+                            'z_height_map': meta['z_height_map'],
+                            'min_image': meta['min_image'],
+                            'z_bounds': meta['z_bounds'],
+                        }
+                        self.views.append(self._build_view_from_data(data, sigma))
+                else:
+                    # Legacy format: flat view_*.npz files (no true memmap)
+                    view_files = sorted([
+                        f for f in os.listdir(data_dir)
+                        if f.startswith("view_") and f.endswith(".npz")
+                    ])
+                    if not view_files:
+                        raise ValueError(
+                            f"No view_*/ directories or view_*.npz files in {data_dir}"
+                        )
+                    for vf in view_files:
+                        data = np.load(os.path.join(data_dir, vf))
+                        self.views.append(self._build_view_from_data(data, sigma))
+
+            elif data_file and os.path.exists(data_file):
+                # Legacy: single .npz file loaded as one view (no true memmap)
+                data = np.load(data_file)
+                self.views.append(self._build_view_from_data(data, sigma))
+
+            else:
+                if not surface or not params:
                     raise ValueError(
-                        f"No view_*/ directories or view_*.npz files found in {data_dir_path}"
+                        "Each surface config must provide 'data_dir_path', "
+                        "'data_file_path', or both 'surface_path' and 'params_path'."
                     )
-                for vf in view_files:
-                    data = np.load(os.path.join(data_dir_path, vf))
-                    self.views.append(self._build_view_from_data(data, sigma))
 
-        elif data_file_path and os.path.exists(data_file_path):
-            # Legacy: single .npz file loaded as one view (no true memmap)
-            data = np.load(data_file_path)
-            self.views.append(self._build_view_from_data(data, sigma))
+                scan_params = config.get('scan_params', [{'angle_deg': 0.0, 'tx': 0.0, 'ty': 0.0}])
+                for sp in scan_params:
+                    view = self._compute_view(
+                        surface, params, i_platform, sigma,
+                        angle_deg=sp.get('angle_deg', 0.0),
+                        tx=sp.get('tx', 0.0),
+                        ty=sp.get('ty', 0.0),
+                    )
+                    self.views.append(view)
 
-        else:
-            if not surface_path or not params_path:
-                raise ValueError(
-                    "Must provide surface_path and params_path if data_dir_path/data_file_path is missing."
-                )
+            self.surface_view_ranges.append((start_idx, len(self.views)))
 
-            if scan_params is None:
-                scan_params = [{'angle_deg': 0.0, 'tx': 0.0, 'ty': 0.0}]
+        if not self.views:
+            raise ValueError("No views were loaded or computed from the provided surface_configs.")
 
-            for sp in scan_params:
-                view = self._compute_view(
-                    surface_path, params_path, i_platform, sigma,
-                    angle_deg=sp.get('angle_deg', 0.0),
-                    tx=sp.get('tx', 0.0),
-                    ty=sp.get('ty', 0.0),
-                )
-                self.views.append(view)
-
-        # --- NORMALIZATION LOGIC START ---
-        # Compute global normalization bounds across all views.
-        # All views must have the same spatial dimensions for a consistent observation space.
-        ref = self.views[0]
-        x_lim = ref['afm_images'].shape[0]
-        y_lim = ref['afm_images'].shape[1]
-
-        global_df_min = np.inf
-        global_df_max = -np.inf
-        global_dz_range = 0.0
-
+        # Store per-view spatial dimensions
         for view in self.views:
-            assert view['afm_images'].shape[0] == x_lim and view['afm_images'].shape[1] == y_lim, \
-                "All views must have the same spatial (X, Y) dimensions."
+            view['x_lim'] = view['afm_images'].shape[0]
+            view['y_lim'] = view['afm_images'].shape[1]
 
-            # 1. Create a mask for valid simulation space (above the surface)
-            # We assume the agent will terminate if it goes below min_image, so we
-            # only want to normalize based on values it can actually see alive.
-
-            # Broadcasting: (1, 1, Z) vs (X, Y, 1) -> (X, Y, Z) boolean mask
-            z_grid = view['z_height_map'][np.newaxis, np.newaxis, :]
-            surface_grid = view['min_image'][:, :, np.newaxis]
-
-            # Include a small margin (e.g. 0.5 A) because the agent might step slightly
-            # below the exact minimum before the termination condition triggers.
-            valid_mask = z_grid >= (surface_grid - norm_margin)
-
-            # Extract valid df values to find realistic min/max
-            valid_df_values = view['afm_images'][valid_mask]
-
-            global_df_min = min(global_df_min, float(np.min(valid_df_values)))
-            global_df_max = max(global_df_max, float(np.max(valid_df_values)))
-
-            # dz is relative to start, max possible deviation is the full Z scan range
-            z_range = view['z_max'] - view['z_min']
-            global_dz_range = max(global_dz_range, z_range)
-
+        # Initialize norm_bounds and spatial limits from first view
+        # (updated per episode in reset to match the active view)
+        ref = self.views[0]
+        self._x_lim = ref['x_lim']
+        self._y_lim = ref['y_lim']
         self.norm_bounds = {
-            'x': (0.0, float(x_lim - 1)),
-            'y': (0.0, float(y_lim - 1)),
-            'df': (global_df_min, global_df_max),
-            'dz': (float(-global_dz_range), float(global_dz_range))
+            'x': (0.0, float(self._x_lim - 1)),
+            'y': (0.0, float(self._y_lim - 1)),
         }
 
-        # --- NORMALIZATION LOGIC END ---
-
-        # Store spatial limits (same for all views)
-        self._x_lim = x_lim
-        self._y_lim = y_lim
-
         # Define observation space
-        # Everything is now float32 and normalized to [-1, 1]
+        # x, y normalized to [-1, 1]; df, dz scaled by fixed divisors
         self.observation_space = gym.spaces.Dict(
             {
                 "x": gym.spaces.Box(-1.0, 1.0, shape=(num_historic_data,), dtype=np.float32),
@@ -413,6 +439,7 @@ class AfmEnvironment(gym.Env):
             '_z_map_start': z_height_map[0],
             '_z_map_step': z_height_map[1] - z_height_map[0],
             '_z_map_len_minus_1': len(z_height_map) - 1,
+            'scan_params': {'angle_deg': angle_deg, 'tx': tx, 'ty': ty},
         }
 
     def _normalize(self, value: np.ndarray | float, key: str) -> np.ndarray | float:
@@ -427,13 +454,20 @@ class AfmEnvironment(gym.Env):
         """
         Convert a normalized observation dictionary back to physical units.
         Useful for plotting and interpretation.
-        Formula: (x + 1) / 2 * (max - min) + min
+
+        x, y: Inverse of ``_normalize`` (using active view's norm_bounds).
+        df:   Multiplied by ``df_scale`` (inverse of division in ``_get_obs``).
+        dz:   Multiplied by ``dz_scale`` (inverse of division in ``_get_obs``).
         """
         physical_obs = {}
         for key, value in obs_dict.items():
-            if key in self.norm_bounds:
+            if key in ('x', 'y'):
                 min_v, max_v = self.norm_bounds[key]
                 physical_obs[key] = (value + 1.0) / 2.0 * (max_v - min_v) + min_v
+            elif key == 'df':
+                physical_obs[key] = value * self.df_scale
+            elif key == 'dz':
+                physical_obs[key] = value * self.dz_scale
             else:
                 physical_obs[key] = value
         return physical_obs
@@ -565,6 +599,14 @@ class AfmEnvironment(gym.Env):
         self._z_map_start = view['_z_map_start']
         self._z_map_step = view['_z_map_step']
         self._z_map_len_minus_1 = view['_z_map_len_minus_1']
+
+        # Update active spatial dimensions and normalization bounds
+        self._x_lim = view['x_lim']
+        self._y_lim = view['y_lim']
+        self.norm_bounds = {
+            'x': (0.0, float(self._x_lim - 1)),
+            'y': (0.0, float(self._y_lim - 1)),
+        }
 
         z = self.z_max - np.random.rand()
         self.z_start_index = self._get_closest_slice_index(z)
