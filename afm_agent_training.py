@@ -25,6 +25,14 @@ model_name = f"sac_afm_model_arch{arch_str}_hist{args.num_historic_data}_df{args
 TRAIN_DIR = os.path.join(TRAIN_BASE_DIR, model_name)
 os.makedirs(TRAIN_DIR, exist_ok=True)
 
+ENVIRONMENT_DIRS = [
+    # "environments/pt_111_small_single_adatom",
+    # "environments/pt_111_small_1_3_vacancies",
+    # "environments/pt_111_small_rows_missing",
+    # "environments/pt_111_small_5row_missing",
+    "environments/pt_111_small_rows_missing_single",
+]
+
 def make_env_gpu(rank=0):
     def _init():
         env = AfmEnvironment(
@@ -44,13 +52,15 @@ def make_env_gpu(rank=0):
 def make_env_load(rank=0):
     def _init():
         env = AfmEnvironment(
-            surface_configs=[{
-                'data_dir_path': "environments/pt_111_small_rows_missing",
-            }],
+            surface_configs=[
+                {"data_dir_path": env_dir} for env_dir in ENVIRONMENT_DIRS
+            ],
             num_historic_data=args.num_historic_data,
             num_actions=1,
             df_scale=args.df_scale,
             dz_scale=args.dz_scale,
+            base_reward=10,
+            crash_reward=-100.0,
         )
         env = Monitor(env)  #, filename=os.path.join("./logs", f"env_{rank}"))
         return env
@@ -71,7 +81,7 @@ model = SAC(
     "MultiInputPolicy",
     vec_env,
     verbose=1,
-    tensorboard_log="./tensorboard_logs_testing",
+    tensorboard_log="./tensorboard_logs_new_env",
     policy_kwargs=policy_kwargs,
     gradient_steps=n_envs,
 )
@@ -86,7 +96,7 @@ checkpoint_callback = CheckpointCallback(
 model.learn(
     total_timesteps=10000000,
     log_interval=1,
-    progress_bar=True,
+    progress_bar=False,
     tb_log_name=model_name,#"sac_afm_env" + train_date,
     callback=[checkpoint_callback],
 )
