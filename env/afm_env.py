@@ -228,6 +228,8 @@ class AfmEnvironment(gym.Env):
                  base_reward: float = 10.0,
                  crash_reward: float = -100.0,
                  termination_reward: float = 1000.0,
+                 reward_ceiling_offset: float = 10.0,
+                 reward_exponent: float = 1.0,
                  jitter_penalty_fn=None,
                  jitter_penalty_kwargs: dict | None = None,
                  jitter_window: int | None = None,
@@ -291,6 +293,15 @@ class AfmEnvironment(gym.Env):
             Penalty applied in the danger zone (scaled) and on a crash (full).
         termination_reward : float
             Bonus reward added on successful scan completion.
+        reward_ceiling_offset : float
+            Vertical margin above the optimal height where the agent is still
+            considered in-bounds. If ``z_new`` exceeds
+            ``optimal_height + reward_ceiling_offset``, the episode terminates
+            with ``crash_reward``.
+        reward_exponent : float
+            Exponent used for the above-optimal-height penalty term in step().
+            The reward in that region becomes
+            ``base_reward - (z_new - z_opt) ** reward_exponent``.
         jitter_penalty_fn : callable | None
             ``fn(dz_window, **kwargs) -> float`` called each non-crash step.
             The returned value is subtracted from the reward.
@@ -320,6 +331,8 @@ class AfmEnvironment(gym.Env):
         self.base_reward = base_reward
         self.crash_reward = crash_reward
         self.termination_reward = termination_reward
+        self.reward_ceiling_offset = reward_ceiling_offset
+        self.reward_exponent = reward_exponent
         self.jitter_penalty_fn = jitter_penalty_fn
         self.jitter_penalty_kwargs = jitter_penalty_kwargs if jitter_penalty_kwargs is not None else {}
         self.jitter_window = jitter_window if jitter_window is not None else num_historic_data
@@ -824,8 +837,13 @@ class AfmEnvironment(gym.Env):
         z_opt = self.optimal_height[x_new, y_new]
         z_min = self.min_image[x_new, y_new]
 
-        if z_new >= z_opt:
-            reward = self.base_reward - (z_new - z_opt)
+        z_ceiling = z_opt + self.reward_ceiling_offset
+
+        if z_new > z_ceiling:
+            # The agent is hiding in the sky. Terminate and punish.
+            return self._get_obs(), self.crash_reward, True, False, self._get_info(include_image=self.include_image_in_info)
+        elif z_new >= z_opt:
+            reward = self.base_reward - ((z_new - z_opt) ** self.reward_exponent)
 
         elif z_new > z_min:
             danger_zone_range = z_opt - z_min
