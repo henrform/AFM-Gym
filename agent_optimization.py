@@ -169,7 +169,7 @@ def objective(trial):
         raise optuna.exceptions.TrialPruned()
 
     # Final evaluation of the fully trained agent
-    mean_reward, _ = evaluate_policy(model, eval_env, n_eval_episodes=10)
+    mean_reward, _ = evaluate_policy(model, eval_env, n_eval_episodes=50)
     
     model.save(os.path.join(trial_dir, "final_model"))
     vec_train_env.save(os.path.join(trial_dir, "vec_normalize.pkl"))
