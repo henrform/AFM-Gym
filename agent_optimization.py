@@ -80,8 +80,15 @@ def objective(trial):
     """The Optuna objective function executed for each trial."""
     
     # 1. Sample Environment Parameters
-    num_historic_data = trial.suggest_int("num_historic_data", 20, 100)
+    num_historic_data = trial.suggest_categorical("num_historic_data", [20, 40, 80, 150, 200, 250, 300, 350, 400])
     reward_exponent = trial.suggest_float("reward_exponent", 1.0, 2.0)
+    net_arch_choice = trial.suggest_categorical("net_arch", ["small", "medium", "large"])
+    if net_arch_choice == "small":
+        net_arch = [256, 256]
+    elif net_arch_choice == "medium":
+        net_arch = [512, 512]
+    else:
+        net_arch = [1024, 1024]
 
     # 2. Sample SAC Hyperparameters
     learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
@@ -103,7 +110,7 @@ def objective(trial):
 
     # Fixed Architecture
     policy_kwargs = dict(
-        net_arch=[512, 512],
+        net_arch=net_arch,
         activation_fn=ReLU,
     )
 
@@ -207,7 +214,7 @@ if __name__ == "__main__":
         pruner=MedianPruner(n_startup_trials=15, n_warmup_steps=6),
     )
 
-    max_trials_callback = MaxTrialsCallback(64)
+    max_trials_callback = MaxTrialsCallback(80)
     try:
         current_best = study.best_value
     except ValueError:
