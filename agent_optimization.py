@@ -85,7 +85,7 @@ def objective(trial):
 
     # 2. Sample SAC Hyperparameters
     learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
-    batch_size = trial.suggest_categorical("batch_size", [256, 512, 1024, 2048])
+    batch_size = trial.suggest_categorical("batch_size", [128, 256, 512])
     gamma = trial.suggest_float("gamma", 0.90, 0.999)
     tau = trial.suggest_float("tau", 0.005, 0.05, log=True)
     net_arch_choice = trial.suggest_categorical("net_arch", ["small", "medium", "large"])
