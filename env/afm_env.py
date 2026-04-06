@@ -841,6 +841,7 @@ class AfmEnvironment(gym.Env):
 
         if z_new > z_ceiling:
             # The agent is hiding in the sky. Terminate and punish.
+            self.terminated = True
             return self._get_obs(), self.crash_reward, True, False, self._get_info(include_image=self.include_image_in_info)
         elif z_new >= z_opt:
             reward = self.base_reward - ((z_new - z_opt) ** self.reward_exponent)
@@ -856,6 +857,7 @@ class AfmEnvironment(gym.Env):
 
         # 3. At or below min_image (Crash Zone)
         else:
+            self.terminated = True
             return self._get_obs(), self.crash_reward, True, False, self._get_info(include_image=self.include_image_in_info)
 
         # Apply jitter penalty

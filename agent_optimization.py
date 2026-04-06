@@ -1,8 +1,8 @@
 import os
 import argparse
-import datetime
 import optuna
 import json
+import gc
 from torch.nn import ReLU
 
 from stable_baselines3 import SAC
@@ -82,6 +82,12 @@ def objective(trial):
     # 1. Sample Environment Parameters
     num_historic_data = trial.suggest_categorical("num_historic_data", [20, 40, 80, 150, 200, 250, 300, 350, 400])
     reward_exponent = trial.suggest_float("reward_exponent", 1.0, 2.0)
+
+    # 2. Sample SAC Hyperparameters
+    learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
+    batch_size = trial.suggest_categorical("batch_size", [256, 512, 1024, 2048])
+    gamma = trial.suggest_float("gamma", 0.90, 0.999)
+    tau = trial.suggest_float("tau", 0.005, 0.05, log=True)
     net_arch_choice = trial.suggest_categorical("net_arch", ["small", "medium", "large"])
     if net_arch_choice == "small":
         net_arch = [256, 256]
@@ -89,12 +95,6 @@ def objective(trial):
         net_arch = [512, 512]
     else:
         net_arch = [1024, 1024]
-
-    # 2. Sample SAC Hyperparameters
-    learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
-    batch_size = trial.suggest_categorical("batch_size", [256, 512, 1024, 2048])
-    gamma = trial.suggest_float("gamma", 0.90, 0.999)
-    tau = trial.suggest_float("tau", 0.005, 0.05, log=True)
 
     # 3. Create the Training Environment (Vectorized for performance)
     n_envs = 4 # Maximize GPU usage per worker
@@ -147,15 +147,15 @@ def objective(trial):
         eval_freq=max(250000 // n_envs, 1) # Adjust for n_envs
     )
 
-    checkpoint_callback = CheckpointCallback(
-        save_freq=max(100000 // n_envs, 1), # Spaced out to prevent disk bloat
-        save_path=os.path.join(trial_dir, "checkpoints"),
-        name_prefix="sac_afm",
-        save_replay_buffer=False,
-        save_vecnormalize=True,
-    )
+    # checkpoint_callback = CheckpointCallback(
+    #     save_freq=max(100000 // n_envs, 1), # Spaced out to prevent disk bloat
+    #     save_path=os.path.join(trial_dir, "checkpoints"),
+    #     name_prefix="sac_afm",
+    #     save_replay_buffer=False,
+    #     save_vecnormalize=True,
+    # )
 
-    callbacks = CallbackList([eval_callback, checkpoint_callback])
+    callbacks = CallbackList([eval_callback]) #, checkpoint_callback])
 
     # Train the Model
     try:
@@ -181,9 +181,18 @@ def objective(trial):
     model.save(os.path.join(trial_dir, "final_model"))
     vec_train_env.save(os.path.join(trial_dir, "vec_normalize.pkl"))
     
-    # Clean up memory
-    model.env.close()
-    eval_env.close()
+    try:
+        model.env.close()
+        eval_env.close()
+    except Exception as e:
+        print(f"Non-fatal error closing envs: {e}")
+    
+    del model
+    del vec_train_env
+    del eval_env
+    del train_env_arr
+    
+    gc.collect()
 
     return mean_reward
 
@@ -229,6 +238,7 @@ if __name__ == "__main__":
         "batch_size": 256,
         "gamma": 0.99,
         "tau": 0.005,
+        "net_arch": "medium",
     }
 
     if args.enqueue:
