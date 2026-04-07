@@ -207,10 +207,16 @@ if __name__ == "__main__":
         heartbeat_interval=60,
         grace_period=120,
         engine_kwargs={
-            "pool_size": 2,
-            "max_overflow": 2,
-            "pool_recycle": 280,
+            "pool_size": 3,
+            "max_overflow": 3,
+            "pool_recycle": 3600,
             "pool_pre_ping": True,
+            "connect_args": {
+                "keepalives": 1,
+                "keepalives_idle": 60,
+                "keepalives_interval": 10,
+                "keepalives_count": 5
+            }
         }
     )
 
