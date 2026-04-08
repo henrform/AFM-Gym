@@ -21,6 +21,7 @@ parser.add_argument("--algorithm", type=str, default="sac", choices=["sac", "ppo
 parser.add_argument("--epsilon", type=float, default=0.2, help="PPO clip epsilon")
 parser.add_argument("--verbose", type=int, default=0, help="Verbosity level")
 parser.add_argument("--use_cnn", action="store_true", help="Use CNN feature extractor")
+parser.add_argument("--reward_ceiling_offset", type=float, default=10.0, help="Vertical margin above optimal height for crash termination")
 args = parser.parse_args()
 
 if args.use_cnn and args.num_historic_data < 64:
@@ -32,7 +33,7 @@ train_date = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 arch_str = "x".join(str(s) for s in args.net_arch)
 epsilon_suffix = f"_eps{args.epsilon}" if args.algorithm == "ppo" else ""
 cnn_suffix = "_cnn" if args.use_cnn else ""
-model_name = f"{args.algorithm}_afm_model_arch{arch_str}_hist{args.num_historic_data}_df{args.df_scale}_dz{args.dz_scale}{epsilon_suffix}{cnn_suffix}_{train_date}"
+model_name = f"{args.algorithm}_afm_model_arch{arch_str}_hist{args.num_historic_data}_df{args.df_scale}_dz{args.dz_scale}_rc{args.reward_ceiling_offset}{epsilon_suffix}{cnn_suffix}_{train_date}"
 TRAIN_DIR = os.path.join(TRAIN_BASE_DIR, model_name)
 os.makedirs(TRAIN_DIR, exist_ok=True)
 
@@ -58,6 +59,7 @@ def make_env_load():
             sigma=2,
             height_offset_reward=0.4,
             reward_exponent=1,
+            reward_ceiling_offset=args.reward_ceiling_offset,
         )
         env = Monitor(env)  #, filename=os.path.join("./logs", f"env_{rank}"))
         return env
@@ -92,8 +94,8 @@ eval_callback = SyncedEvalCallback(
     eval_env,
     best_model_save_path=os.path.join(TRAIN_DIR, "best_model"),
     log_path=os.path.join(TRAIN_DIR, "eval_logs"),
-    eval_freq=max(100_000 // n_envs, 1),
-    n_eval_episodes=50,
+    eval_freq=max(10_000 // n_envs, 1),
+    n_eval_episodes=15,
     deterministic=True,
     render=False,
 )

@@ -726,6 +726,9 @@ class AfmEnvironment(gym.Env):
         self.generated_image[:] = np.nan
         self.generated_image[0, 0] = self._get_interpolated_df(0, 0, self.z_start)
 
+        # Track whether the agent has entered a valid zone (for ceiling offset logic)
+        self._has_entered_valid_zone = False
+
         return self._get_obs(), self._get_info(include_image=self.include_image_in_info)
 
     def _insert_into_array(self, array: np.ndarray, data_point):
@@ -839,8 +842,12 @@ class AfmEnvironment(gym.Env):
 
         z_ceiling = z_opt + self.reward_ceiling_offset
 
-        if z_new > z_ceiling:
-            # The agent is hiding in the sky. Terminate and punish.
+        # Check if agent is in a valid zone (at or above z_min and at or below z_ceiling)
+        if z_new <= z_ceiling and z_new >= z_min:
+            self._has_entered_valid_zone = True
+
+        # Only apply ceiling crash if agent has been in a valid zone
+        if z_new > z_ceiling and self._has_entered_valid_zone:
             self.terminated = True
             return self._get_obs(), self.crash_reward, True, False, self._get_info(include_image=self.include_image_in_info)
         elif z_new >= z_opt:
