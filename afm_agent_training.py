@@ -99,34 +99,36 @@ eval_callback = SyncedEvalCallback(
 )
 
 class AfmCnnExtractor(BaseFeaturesExtractor):
-    def __init__(self, observation_space, features_dim=256):
+    def __init__(self, observation_space, features_dim=162):
         super().__init__(observation_space, features_dim)
-        # observation is a dict with df, dz, x, y each of shape (num_historic_data,)
+        
         self.cnn = nn.Sequential(
-            nn.Conv1d(4,   32,  kernel_size=8, stride=4),  # → 99
+            nn.Conv1d(2,   32,  kernel_size=8, stride=4),
             nn.ReLU(),
-            nn.Conv1d(32,  64,  kernel_size=4, stride=2),  # → 48
+            nn.Conv1d(32,  64,  kernel_size=4, stride=2),
             nn.ReLU(),
-            nn.Conv1d(64,  128, kernel_size=4, stride=2),  # → 23
+            nn.Conv1d(64,  128, kernel_size=4, stride=2),
             nn.ReLU(),
-            nn.Conv1d(128, 128, kernel_size=4, stride=2),  # → 10
+            nn.Conv1d(128, 128, kernel_size=4, stride=2),
             nn.ReLU(),
-            nn.Flatten(),                                   # → 1280
+            nn.Flatten(),
         )
-        # Compute flatten dim using a dummy input
+        
         num_historic_data = observation_space["df"].shape[0]
         with torch.no_grad():
-            sample = torch.zeros(1, 4, num_historic_data)
+            sample = torch.zeros(1, 2, num_historic_data)
             n_flatten = self.cnn(sample).shape[1]
+        
         self.linear = nn.Sequential(
-            nn.Linear(n_flatten, features_dim),
+            nn.Linear(n_flatten, features_dim - 2),  # reserve 2 dims for x, y
             nn.ReLU(),
         )
 
     def forward(self, obs):
-        # Stack dict entries into (batch, channels, timesteps)
-        x = torch.stack([obs["df"], obs["dz"], obs["x"], obs["y"]], dim=1)
-        return self.linear(self.cnn(x))
+        x = torch.stack([obs["df"], obs["dz"]], dim=1)  # (batch, 2, T)
+        cnn_out = self.linear(self.cnn(x))
+        pos = torch.stack([obs["x"][:, 0], obs["y"][:, 0]], dim=1)  # current position only
+        return torch.cat([cnn_out, pos], dim=1)
 
 policy_kwargs = dict(
     net_arch=args.net_arch,
@@ -134,7 +136,7 @@ policy_kwargs = dict(
 )
 if args.use_cnn:
     policy_kwargs["features_extractor_class"] = AfmCnnExtractor
-    policy_kwargs["features_extractor_kwargs"] = dict(features_dim=160)
+    policy_kwargs["features_extractor_kwargs"] = dict(features_dim=162)
 
 if args.algorithm == "sac":
     model = SAC(
