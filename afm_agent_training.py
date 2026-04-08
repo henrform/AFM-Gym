@@ -65,6 +65,7 @@ def make_env_load(rank=0):
             crash_reward=-100.0,
             sigma=2,
             height_offset_reward=0.4,
+            reward_exponent=1,
         )
         env = Monitor(env)  #, filename=os.path.join("./logs", f"env_{rank}"))
         return env
@@ -74,7 +75,7 @@ def make_env_load(rank=0):
 n_envs = 4
 env_arr = [make_env_load(i) for i in range(n_envs)]
 vec_env = DummyVecEnv(env_arr)
-vec_env = VecNormalize(vec_env, norm_obs=False, norm_reward=True, clip_obs=10.)
+vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=True, clip_obs=10.)
 
 policy_kwargs = dict(
     net_arch=args.net_arch,
@@ -86,7 +87,7 @@ if args.algorithm == "sac":
         "MultiInputPolicy",
         vec_env,
         verbose=1,
-        tensorboard_log="./tensorboard_logs_final_envs",
+        tensorboard_log="./tensorboard_logs_final_envs_sac",
         policy_kwargs=policy_kwargs,
         gradient_steps=n_envs,
         device="cuda",
@@ -104,7 +105,7 @@ else:
     )
 
 checkpoint_callback = CheckpointCallback(
-    save_freq=10000,
+    save_freq=50000 // n_envs,
     save_path=os.path.join(TRAIN_DIR, "models"),
     name_prefix=model_name,
     save_replay_buffer=False,
@@ -112,7 +113,7 @@ checkpoint_callback = CheckpointCallback(
 )
 
 model.learn(
-    total_timesteps=50000000,
+    total_timesteps=10000000,
     log_interval=1,
     progress_bar=False,
     tb_log_name=model_name,#"sac_afm_env" + train_date,
