@@ -30,6 +30,7 @@ parser.add_argument("--batch_size", type=int, default=256, help="Batch size for 
 parser.add_argument("--norm_obs", action=argparse.BooleanOptionalAction, default=True, help="Normalize observations")
 parser.add_argument("--norm_reward", action=argparse.BooleanOptionalAction, default=True, help="Normalize rewards")
 parser.add_argument("--n_steps", type=int, default=2048, help="PPO only: number of steps per environment per update")
+parser.add_argument("--gradient_steps", type=int, default=None, help="SAC only: number of gradient steps per update (default: n_envs)")
 args = parser.parse_args()
 
 if args.use_cnn and args.num_historic_data < 64:
@@ -141,7 +142,7 @@ eval_callback = SyncedEvalCallback(
     best_model_save_path=os.path.join(TRAIN_DIR, "best_model"),
     log_path=os.path.join(TRAIN_DIR, "eval_logs"),
     eval_freq=args.callback_freq // n_envs,
-    n_eval_episodes=20,
+    n_eval_episodes=10,
     deterministic=True,
     render=False,
 )
@@ -188,6 +189,7 @@ if args.use_cnn:
     policy_kwargs["features_extractor_kwargs"] = dict(features_dim=162)
 
 if args.algorithm == "sac":
+    gradient_steps = args.gradient_steps if args.gradient_steps is not None else n_envs
     model = SAC(
         "MultiInputPolicy",
         vec_env,
@@ -196,7 +198,7 @@ if args.algorithm == "sac":
         policy_kwargs=policy_kwargs,
         learning_rate=args.learning_rate,
         batch_size=args.batch_size,
-        gradient_steps=n_envs,
+        gradient_steps=gradient_steps,
         device="cuda",
     )
 else:
