@@ -32,6 +32,9 @@ parser.add_argument("--norm_reward", action=argparse.BooleanOptionalAction, defa
 parser.add_argument("--n_steps", type=int, default=2048, help="PPO only: number of steps per environment per update")
 parser.add_argument("--gradient_steps", type=int, default=None, help="SAC only: number of gradient steps per update (default: n_envs)")
 parser.add_argument("--tau", type=float, default=0.005, help="SAC only: target network update coefficient")
+parser.add_argument("--ent_coef", type=float, default=0.01, help="Entropy regularization coefficient")
+parser.add_argument("--checkpoint_model", type=str, default=None, help="Path to a model checkpoint .zip file to resume training from")
+parser.add_argument("--checkpoint_vecnormalize", type=str, default=None, help="Path to a VecNormalize .pkl file to restore observation/reward statistics")
 args = parser.parse_args()
 
 if args.use_cnn and args.num_historic_data < 64:
@@ -81,7 +84,14 @@ def make_env_load():
 n_envs = args.n_envs
 env_arr = [make_env_load() for _ in range(n_envs)]
 vec_env = DummyVecEnv(env_arr)
-vec_env = VecNormalize(vec_env, norm_obs=args.norm_obs, norm_reward=args.norm_reward, clip_obs=10.)
+
+if args.checkpoint_vecnormalize is not None:
+    print(f"Loading VecNormalize stats from: {args.checkpoint_vecnormalize}")
+    vec_env = VecNormalize.load(args.checkpoint_vecnormalize, vec_env)
+    vec_env.training = True
+    vec_env.norm_reward = args.norm_reward
+else:
+    vec_env = VecNormalize(vec_env, norm_obs=args.norm_obs, norm_reward=args.norm_reward, clip_obs=10.)
 
 eval_env = DummyVecEnv([make_env_load()])
 eval_env = VecNormalize(eval_env, norm_obs=args.norm_obs, norm_reward=False, clip_obs=10., training=False)
@@ -189,7 +199,20 @@ if args.use_cnn:
     policy_kwargs["features_extractor_class"] = AfmCnnExtractor
     policy_kwargs["features_extractor_kwargs"] = dict(features_dim=162)
 
-if args.algorithm == "sac":
+if args.checkpoint_model is not None:
+    print(f"Loading model from checkpoint: {args.checkpoint_model}")
+    ModelClass = SAC if args.algorithm == "sac" else PPO
+    model = ModelClass.load(args.checkpoint_model, env=vec_env, device="cuda")
+    # Override hyperparams that may differ from the checkpoint
+    model.learning_rate = args.learning_rate
+    model.batch_size = args.batch_size
+    if args.algorithm == "sac":
+        model.tau = args.tau
+        model.gradient_steps = args.gradient_steps if args.gradient_steps is not None else n_envs
+    else:
+        model.clip_range = args.epsilon
+        model.ent_coef = args.ent_coef
+elif args.algorithm == "sac":
     gradient_steps = args.gradient_steps if args.gradient_steps is not None else n_envs
     model = SAC(
         "MultiInputPolicy",
@@ -214,7 +237,7 @@ else:
         batch_size=args.batch_size,
         n_steps=args.n_steps,
         clip_range=args.epsilon,
-        ent_coef=0.01,
+        ent_coef=args.ent_coef,
         device="cuda",
     )
 
