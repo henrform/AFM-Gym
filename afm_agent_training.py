@@ -6,6 +6,7 @@ from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback,
 from stable_baselines3 import SAC, PPO
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from stable_baselines3.common.utils import constant_fn
 import os
 import datetime
 from torch.nn import ReLU
@@ -204,13 +205,13 @@ if args.checkpoint_model is not None:
     ModelClass = SAC if args.algorithm == "sac" else PPO
     model = ModelClass.load(args.checkpoint_model, env=vec_env, device="cuda")
     # Override hyperparams that may differ from the checkpoint
-    model.learning_rate = args.learning_rate
+    model.learning_rate = constant_fn(args.learning_rate)
     model.batch_size = args.batch_size
     if args.algorithm == "sac":
         model.tau = args.tau
         model.gradient_steps = args.gradient_steps if args.gradient_steps is not None else n_envs
     else:
-        model.clip_range = args.epsilon
+        model.clip_range = constant_fn(args.epsilon)
         model.ent_coef = args.ent_coef
 elif args.algorithm == "sac":
     gradient_steps = args.gradient_steps if args.gradient_steps is not None else n_envs
@@ -264,7 +265,8 @@ model.learn(
     total_timesteps=10000000,
     log_interval=1,
     progress_bar=False,
-    tb_log_name=model_name,#"sac_afm_env" + train_date,
+    tb_log_name=model_name,
+    reset_num_timesteps=args.checkpoint_model is None,
     callback=CallbackList(callbacks),
 )
 model.save(os.path.join(TRAIN_DIR, "final_model"))
