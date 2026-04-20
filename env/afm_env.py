@@ -4,7 +4,6 @@ from ppafm.io import loadXYZ
 from ppafm.ocl.AFMulator import AFMulator
 from ppafm.ocl.oclUtils import init_env
 from ppafm.common import PpafmParameters
-import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter
 from scipy.signal import argrelextrema
 import numpy as np
@@ -158,8 +157,6 @@ class AfmEnvironment(gym.Env):
         parameters.gridA = gridA
         parameters.gridB = gridB
         parameters.gridC = gridC
-
-        new_params_path = params_path.replace(".ini", "_displaced.toml")
 
         with tempfile.NamedTemporaryFile(
             suffix=".toml", prefix="ppafm_params_", delete=False
@@ -746,26 +743,6 @@ class AfmEnvironment(gym.Env):
         self._has_entered_valid_zone = False
 
         return self._get_obs(), self._get_info(include_image=self.include_image_in_info)
-
-    def _insert_into_array(self, array: np.ndarray, data_point):
-        """
-        Modifies an array by rolling it to the right and inserting a new data point at the beginning.
-
-        Parameters
-        ----------
-        array : numpy.ndarray
-            The input array to be modified.
-        data_point : Any
-            The new data point
-
-        Returns
-        -------
-        numpy.ndarray
-            The modified array
-        """
-        array = np.roll(array, 1)
-        array[0] = data_point
-        return array
 
     def step(self, action) -> tuple[ObsType, SupportsFloat, bool, bool, dict[str, Any]]:
         """Execute one timestep within the environment.
