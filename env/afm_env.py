@@ -477,7 +477,6 @@ class AfmEnvironment(gym.Env):
         )
 
         # Define action space
-        # TODO: What is the maximum speed for the tip?
         if self.num_actions > 1:
             self.action_space = gym.spaces.Discrete(self.num_actions)
             self._action_map = np.linspace(-1.0, 1.0, self.num_actions)
@@ -547,7 +546,6 @@ class AfmEnvironment(gym.Env):
         z_min = afmulator.scan_window[0][2]
         z_max = afmulator.scan_window[1][2] - afmulator.df_steps * afmulator.dz
 
-        # TODO: Shift optimal height upwards?
         optimal_height = gaussian_filter(min_image, sigma=sigma) + self.height_offset_reward
 
         del afmulator
@@ -727,7 +725,6 @@ class AfmEnvironment(gym.Env):
 
         return info
 
-    # TODO: Randomize start position and rotation. Maybe also switch between different surfaces?
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None) -> tuple[ObsType, dict[str, Any]]:
         """
         Reset the environment at the start of a new episode.
@@ -864,7 +861,6 @@ class AfmEnvironment(gym.Env):
         self._y[0] = y_new
 
         # Update dz and df
-        # TODO: Clip z
         if self.num_actions > 1:
             continuous_action = self._action_map[action]
             dz_new = self._dz[1] + continuous_action
@@ -901,7 +897,6 @@ class AfmEnvironment(gym.Env):
         self.generated_image[x_new, y_new] = df_new
 
         # Check for crashes and calculate reward
-        # TODO: Add tolerance?
 
         z_opt = self.optimal_height[x_new, y_new]
         z_min = self.min_image[x_new, y_new]
