@@ -7,3 +7,4 @@ train_results
 environments
 logs
 eval_results
+hyperparameter_optimization
