@@ -483,6 +483,10 @@ class AfmEnvironment(gym.Env):
         else:
             self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(1,), dtype=np.float64)
 
+        # Optional reset override used by evaluation code to select a fixed view.
+        # If None, reset() samples a random view as before.
+        self.forced_view_idx: int | None = None
+
         self.active_view_idx = None
         self.reset()
 
@@ -716,9 +720,28 @@ class AfmEnvironment(gym.Env):
             Contains the starting z height (``'z'``) and its slice index
             (``'z_i'``), plus the generated image when requested.
         """
+        x_pos = int(self._x[0])
+        y_pos = int(self._y[0])
+        z_current = self.z_start + float(self._dz[0])
+        z_opt = float(self.optimal_height[x_pos, y_pos]) if self.optimal_height is not None else float("nan")
+        z_min_local = float(self.min_image[x_pos, y_pos]) if self.min_image is not None else float("nan")
+
+        if z_current >= z_opt:
+            zone = "above_optimal"
+        elif z_current > z_min_local:
+            zone = "danger"
+        else:
+            zone = "crash"
+
         info = {
             "z": self.z_start,
             "z_i": self.z_start_index,
+            "x_pos": x_pos,
+            "y_pos": y_pos,
+            "z_current": z_current,
+            "z_opt": z_opt,
+            "z_min_local": z_min_local,
+            "zone": zone,
         }
         if include_image:
             info["generated_image"] = self.generated_image
@@ -729,7 +752,7 @@ class AfmEnvironment(gym.Env):
         """
         Reset the environment at the start of a new episode.
 
-        Randomly selects one of the loaded views, optionally unloading the
+        Selects one of the loaded views (random by default), optionally unloading the
         previously active lazy view, and initializes tip position, history
         buffers, and the generated image. A random starting z height within
         the scan window is drawn.
@@ -740,6 +763,7 @@ class AfmEnvironment(gym.Env):
             Seed for the random number generator.
         options : dict[str, Any] | None
             Options forwarded to the ``gym.Env`` super class.
+            Supports ``{"view_idx": int}`` to force a specific view.
 
         Returns
         -------
@@ -754,8 +778,21 @@ class AfmEnvironment(gym.Env):
 
         self.terminated = False
 
-        # Randomly sample a view for this episode
-        view_idx = np.random.randint(len(self.views))
+        forced_view_idx = None
+        if options is not None and "view_idx" in options:
+            forced_view_idx = int(options["view_idx"])
+        elif self.forced_view_idx is not None:
+            forced_view_idx = int(self.forced_view_idx)
+
+        # Randomly sample a view unless an explicit view override is provided.
+        if forced_view_idx is None:
+            view_idx = int(np.random.randint(len(self.views)))
+        else:
+            if forced_view_idx < 0 or forced_view_idx >= len(self.views):
+                raise ValueError(
+                    f"Invalid view_idx={forced_view_idx}; expected [0, {len(self.views) - 1}]"
+                )
+            view_idx = forced_view_idx
 
         if self.unload_view_on_reset and self.active_view_idx is not None and self.active_view_idx != view_idx:
             self._unload_view(self.active_view_idx)
