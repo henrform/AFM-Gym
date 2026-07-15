@@ -6,6 +6,7 @@ from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback,
 from stable_baselines3 import SAC, PPO
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from stable_baselines3.common.type_aliases import TrainFreq, TrainFrequencyUnit
 from stable_baselines3.common.utils import constant_fn
 import os
 import datetime
@@ -32,6 +33,9 @@ parser.add_argument("--norm_obs", action=argparse.BooleanOptionalAction, default
 parser.add_argument("--norm_reward", action=argparse.BooleanOptionalAction, default=True, help="Normalize rewards")
 parser.add_argument("--n_steps", type=int, default=2048, help="PPO only: number of steps per environment per update")
 parser.add_argument("--gradient_steps", type=int, default=None, help="SAC only: number of gradient steps per update (default: n_envs)")
+parser.add_argument("--train_freq", type=int, default=1, help="SAC only: vector-environment steps collected before each update")
+parser.add_argument("--learning_starts", type=int, default=100, help="SAC only: transitions collected before learning starts")
+parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
 parser.add_argument("--tau", type=float, default=0.005, help="SAC only: target network update coefficient")
 parser.add_argument("--ent_coef", type=float, default=0.01, help="Entropy regularization coefficient")
 parser.add_argument("--checkpoint_model", type=str, default=None, help="Path to a model checkpoint .zip file to resume training from")
@@ -91,11 +95,25 @@ if args.checkpoint_vecnormalize is not None:
     vec_env = VecNormalize.load(args.checkpoint_vecnormalize, vec_env)
     vec_env.training = True
     vec_env.norm_reward = args.norm_reward
+    vec_env.gamma = args.gamma
 else:
-    vec_env = VecNormalize(vec_env, norm_obs=args.norm_obs, norm_reward=args.norm_reward, clip_obs=10.)
+    vec_env = VecNormalize(
+        vec_env,
+        norm_obs=args.norm_obs,
+        norm_reward=args.norm_reward,
+        clip_obs=10.,
+        gamma=args.gamma,
+    )
 
 eval_env = DummyVecEnv([make_env_load()])
-eval_env = VecNormalize(eval_env, norm_obs=args.norm_obs, norm_reward=False, clip_obs=10., training=False)
+eval_env = VecNormalize(
+    eval_env,
+    norm_obs=args.norm_obs,
+    norm_reward=False,
+    clip_obs=10.,
+    gamma=args.gamma,
+    training=False,
+)
 eval_env.obs_rms = vec_env.obs_rms
 
 class LogConfigCallback(BaseCallback):
@@ -207,9 +225,12 @@ if args.checkpoint_model is not None:
     model = ModelClass.load(args.checkpoint_model, env=vec_env, device="cuda", tensorboard_log=tb_log_dir)
     model.learning_rate = constant_fn(args.learning_rate)
     model.batch_size = args.batch_size
+    model.gamma = args.gamma
     if args.algorithm == "sac":
         model.tau = args.tau
         model.gradient_steps = args.gradient_steps if args.gradient_steps is not None else n_envs
+        model.train_freq = TrainFreq(args.train_freq, TrainFrequencyUnit.STEP)
+        model.learning_starts = args.learning_starts
     else:
         model.clip_range = constant_fn(args.epsilon)
         model.ent_coef = args.ent_coef
@@ -224,7 +245,10 @@ elif args.algorithm == "sac":
         policy_kwargs=policy_kwargs,
         learning_rate=args.learning_rate,
         batch_size=args.batch_size,
+        learning_starts=args.learning_starts,
+        train_freq=args.train_freq,
         gradient_steps=gradient_steps,
+        gamma=args.gamma,
         tau=args.tau,
         device="cuda",
     )
@@ -238,6 +262,7 @@ else:
         learning_rate=args.learning_rate,
         batch_size=args.batch_size,
         n_steps=args.n_steps,
+        gamma=args.gamma,
         clip_range=args.epsilon,
         ent_coef=args.ent_coef,
         device="cuda",
